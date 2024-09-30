@@ -1,0 +1,5 @@
+model;RMSE_val;RMSE_test;Score_test
+model_1l;15,76;14,17;2264,47
+model_2l;13,78;13,78;879,87
+model_3l;17,74;17,74;2964,07
+model_4l;14,70;14,70;818,12

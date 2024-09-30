@@ -1,0 +1,988 @@
+---
+title: "simcleaning"
+author: "Lamine, Mory, Ndeye"
+date: "2024-04-24"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Libraries
+
+```{r library}
+library("ClustOfVar")
+library("ClustVarLV")
+library("WGCNA")
+library("Hmisc")
+library("cluster")
+library("NMF")
+library("diceR")
+library("fuzzyforest")
+library("randomForest")
+library("fungible")
+library("fossil")
+library("Hmisc")
+library("cluster")
+library("FactoMineR")
+library("factoextra")
+library("NbClust")
+library("corrplot")
+library("SimDesign")
+library(quadprog)
+library(NMF)
+library(Matrix)
+library(kernlab)
+library(aricode)
+```
+
+## Functions
+
+```{r datasimulation,results='hide'}
+linear_sim <- function(n, mod_sizes, beta_pos, beta_vals, rho=.8, sd=.1, LastModCorr=FALSE){
+    sim_mod <- function(n,p,corr) {
+      sigma <- matrix(corr, nrow=p, ncol=p)
+      diag(sigma) <- 1
+      X <- rmvnorm(n, sigma=sigma)
+      return(X)
+    }
+    number_of_mods <- length(mod_sizes)
+    if(!(LastModCorr)){
+      for(i in 1:number_of_mods){ 
+        all_modules <- lapply(1:(number_of_mods - 1),
+                              function(j) sim_mod(n, mod_sizes[j], rho))
+      }
+      all_modules[[number_of_mods]] <- matrix(rnorm(mod_sizes[number_of_mods]*n), nrow=n, ncol=mod_sizes[number_of_mods])
+    }else{
+      for(i in 1:number_of_mods){ 
+        all_modules <- lapply(1:(number_of_mods),
+                              function(j) sim_mod(n, mod_sizes[j], rho))
+      }
+    }
+    
+    X <- do.call(cbind,  all_modules)
+    p <- dim(X)[2]
+    beta <- rep(0, sum(mod_sizes))
+    beta[beta_pos] <- beta_vals
+    y <- X%*%beta + rnorm(n, sd=sd)
+    X <- as.data.frame(X)
+    names(X) <- paste("V", 1:p, sep="")
+    out <- list(X=X, y=y, beta=beta, name_data = cat("linear_sim", mod_sizes, sep = "_"))
+}
+
+# {r Nonlinear simulation func}
+nonlinear_sim <- function(n, mod_sizes, rho=.8){
+    sim_mod <- function(n,p,corr) {
+      sigma <- matrix(corr, nrow=p, ncol=p)
+      diag(sigma) <- 1
+      X <- rmvnorm(n, sigma=sigma)
+      return(X)
+    }
+    number_of_mods <- length(mod_sizes)
+    
+    for(i in 1:number_of_mods){
+      all_modules <- lapply(1:(number_of_mods - 1),
+                            function(j) sim_mod(n, mod_sizes[j], rho))
+    }
+    
+    all_modules[[number_of_mods]] <- matrix(rnorm(mod_sizes[number_of_mods]*n),
+                                            nrow=n, ncol=mod_sizes[number_of_mods])
+    X <- do.call(cbind,  all_modules)
+    p <- dim(X)[2]
+    #Equation : Fuzzy Forests Research Paper (Conn et al. - 2019)
+    y <- X[,1]+X[,2]+ 2.92*X[,1]*X[,2] + sqrt(15)*X[,3] + X[,4]**3 + X[,76] + X[,77] + 3.74*X[,76]*X[,77] + sqrt(15)*X[,78] + X[,79] ** 3
+    X <- as.data.frame(X)
+    names(X) <- paste("V", 1:p, sep="")
+    out <- list(X=X, y=y, beta=beta, name_data = cat("nonlinear_sim", mod_sizes, sep = "_"))
+}
+```
+
+```{r Simulations loop function}
+sims <- function(simType=1, n=30){
+  Xs <- data.frame()
+  Ys <- data.frame()
+  if(simType==1){
+    for(i in 1:n){
+      sim <- linear_sim(n=250, mod_sizes=c(25, 25, 25, 25),
+                          beta_pos=c(1:3, 76:78),
+                          beta_vals=c(5, 5, 2, 5, 5, 2), rho=.8,
+                          sd=.05,LastModCorr = TRUE)
+      X <- sim$X ; y <- sim$y
+      Xs <- append(Xs,list(X)) ; Ys <- append(Ys,list(y))
+    }
+  }else if(simType==2){
+    for(i in 1:n){
+      sim <- linear_sim(n=250, mod_sizes=c(25, 25, 25, 25),
+                          beta_pos=c(1:3, 76:78),
+                          beta_vals=c(5, 5, 2, 5, 5, 2), rho=.8, sd=.05)
+      X <- sim$X ; y <- sim$y
+      Xs <- append(Xs,list(X)) ; Ys <- append(Ys,list(y))
+    }
+  }else{
+    for(i in 1:n){
+      sim <- nonlinear_sim(n=250, mod_sizes=c(25,25,25,25), rho=.8)
+      X <- sim$X ; y <- sim$y
+      Xs <- append(Xs,list(X)) ; Ys <- append(Ys,list(y))
+    }
+  }
+  out <- list(Xs=Xs,Ys=Ys)
+}
+```
+
+```{r clusteringSims}
+clusteringSims <- function(X, Y, k){
+  # First iteration is out of the loop in order to be able to bind partitions easily
+    dissPear = 1-abs(cor(X,method="pearson")) 
+  suppressMessages({NbClus <- NbClust(diss = as.dist(dissPear), distance = NULL, max.nc = 10, method = "ward.D2", index="silhouette")})
+  
+  
+  NbClustWdSil <- NbClus$Best.partition
+   # CLV
+  
+  CLVObj <- CLV(data.matrix(X), Xu = NULL, Xr = NULL, 
+                  method = 'directional', sX= TRUE, sXr = FALSE, sXu = FALSE, 
+                  nmax =20, maxiter = 20, graph = FALSE)
+  
+  CLVClust = CLVObj$partition4$clusters[2,]
+  
+ 
+      
+    # Varclus
+      VarClusObj <- varclus(data.matrix(X), similarity = "spear")
+      VarClus <- cutree(VarClusObj$hclust, k = k)
+    # Diana
+      DianaObj <- diana(t(data.matrix(X)), stop.at.k = TRUE)
+      DianaClust <- cutree(as.hclust(DianaObj), 4)
+    # Agnes
+      agnClus <- agnes(t(data.matrix(X)))
+      agnesClus <- cutree(as.hclust(agnClus), k = 4)
+    # Hclustvar
+      pamClus <- pam(dissPear,k,diss=TRUE)
+      pamLabels <- pamClus$clustering
+      
+      hClus <-hclustvar(X.quanti = X)
+      hclusres <- cutree(hClus, k = 4)
+    
+    # kmeansVarClus
+      
+      kmeansvarObj <- kmeansvar(X.quanti=X,init=cutree(hClus, k = 4))
+      kmeansvarClus <- kmeansvarObj$cluster
+      
+      list_part_sc =list()
+      list_crit = NULL
+      
+      for (iter in 1:30) {
+        
+        sc <- specc(t(X), centers=4)
+        list_crit = c(list_crit, sum(sc@size*sc@withinss)/sum(sc@size))
+        list_part_sc[[iter]] =sc
+        
+        
+      }
+      
+     sc = list_part_sc[[order(list_crit)[1]]]
+     sc=sc@.Data
+     ScClus <- sc
+      
+  out <-  cbind(NbClustWdSil,CLVClust ,VarClus,DianaClust, agnesClus, pamLabels,hclusres,kmeansvarClus,ScClus)
+  
+return(out)
+  
+}
+
+```
+
+
+```{r}
+kmeansvarObj <- kmeansvar(X.quanti=X,init=cutree(hClus, k = 4))
+kmeansvarClus <- kmeansvarObj$cluster
+
+x_t = t(X)
+
+X_1 = x_t[1:25,]
+X_2 = x_t[26:50,]
+X_3 = x_t[51:75,]
+X_4 = x_t[76:100,]
+
+c1 = apply(X_1, 2, mean)
+c2 = apply(X_2, 2, mean)
+c3 = apply(X_3, 2, mean)
+c4 = apply(X_4, 2, mean)
+
+centres = as.numeric(rbind(c1, c2, c3, c4))
+
+centres = matrix(centres, 4,100)
+
+ARI = list()
+
+for (iter in 1:30) {
+
+  sc <- specc(t(X), centers=4)
+      sc=sc@.Data
+      ScClus <- sc
+      ARI[[iter]] = randIndex(table(ScClus, partition_ref), adjust = TRUE)
+    
+}
+ARI
+
+```
+
+
+
+
+
+```{r, w_nmf_corrected}
+# Calcul_Hp retourne les tableau dijonctifs des classifications obtenue sur chaque tableau
+# entrée: l'ensemble des partitions P ==option partitions
+# l'ensemble des tableaux M == option tableau
+# k est le nombre de classes
+
+# Cette fonction retourne une liste de matrices d'indicatrices
+# Entrées: liste de tableau M, ou liste de de partition P
+
+Calcul_Hp=function(Tab, option,nb){
+  H_comp=vector(mode = "list",length = length(Tab))
+	  if(option=="P"){
+	    for (i in seq_along(Tab)){
+	      
+	      H=FactoMineR::tab.disjonctif(as.factor(as.vector(Tab[[i]])))
+	      H_comp[[i]]=H
+	      
+	    }
+	   }
+      
+	  else if(option=="M"){
+	    for (i in seq_along(Tab)){
+	    H_comp[[i]]=FactoMineR::tab.disjonctif(kmeans(as.data.frame(Tab[[i]]),nb)$cluster)
+	    }
+	  }
+  
+return(H_comp)
+}
+
+# Calcul de l'nsemble des M matrice de connectivité
+# Elle retourne une liste de M
+ 
+Calcul_allM=function(Tab, option,nb){
+  #H_comp=vector(mode = "list",length = length(Tab))
+  all_M=vector(mode = "list",length = length(Tab))
+  
+  if(option=="P"){
+    for (i in seq_along(Tab)){
+      H_ <- FactoMineR::tab.disjonctif(as.factor(as.vector(Tab[[i]]))) #Calcul de H
+      all_M[[i]] <- H_%*%t(H_)
+      #H_comp[[i]]=FactoMineR::tab.disjonctif(as.data.frame(Tab[[i]]))
+    }
+  }
+  
+  else if(option=="M"){
+    for (i in seq_along(Tab)){
+      H_ <-FactoMineR::tab.disjonctif(kmeans(as.data.frame(Tab[[i]]),nb)$cluster)
+      all_M[[i]] <- H_%*%t(H_)
+    }
+  }
+  return(all_M)
+}
+
+#----------------------------------------------------------------------------------
+
+# Poid_init retourne les poids initialisés de façon uniforme
+# Elle prend en arguments une liste de partitions ou de tableaux
+
+Poid_init=function(part){
+  nb_part=length(part) # Nombre de partitions
+  W_ini=vector(mode = "double",length = nb_part) # initialisation des poids à un vecteur null
+  
+  for (i in 1:nb_part){
+    W_ini[i]=1/nb_part # vecteur contenant les poids uniformes 1/T
+  }
+  
+  return(W_ini)
+}
+
+#--------------------------------------------------------------
+
+# Calcul_A retourne une matrice carrée de dimensions (nb_partition,nb_partition)
+# Elle prend en argument une liste de matrice d'indicatrice H_, calcul les matrices de connectivité
+# et retourne 
+# A est une matrice carré de dimensions n,n
+ 
+Calcul_A=function(H_){
+  nb_part=length(H_)
+  H_ <- lapply(H_, as.matrix)
+  A=matrix(0,nb_part,nb_part) #Initialiser A(nb_partition,nb_partition)
+  for (i in 1:nb_part){
+    for(j in 1:nb_part){
+      A[i,j]=Trace((H_[[i]]%*%t(H_[[i]]))%*%(H_[[j]]%*%t(H_[[j]])))
+    }
+  }
+  
+  return(A)
+}
+
+#--------------------------------------------------------------------------------
+
+# Cette fonction retourne une matrice moyenne pondérée
+# Elle prend en argument Une liste de matrice et un vecteur poids
+
+Moy_pond=function(list_mat,W_){
+  nb_part=length(list_mat)
+  list_mat=lapply(list_mat, as.matrix)
+  
+  M_avg=matrix(0, dim(list_mat[[1]])[1],dim(list_mat[[1]])[1]) # Initialisation d'une matrice vide
+  
+  for (i in 1:nb_part){
+    M_avg=M_avg+W_[i]*list_mat[[i]]%*%t(list_mat[[i]])
+  }
+  
+  return(M_avg)
+}
+
+#----------------------------------------------------------------
+
+# Source::Vincent Audigier
+# Dans cette fonction j'ai juste utilisé la partie sur la factorisation par NMF de la matrice Htilde
+
+nmf_<-function(Mtilde,nb.clust,threshold=10^(-5),printflag=TRUE,nstart=100,iter.max=50){
+  # Initialisation
+  # Mtilde <- H_tilde
+  # H_tilde <- Mtilde
+  res.kmeans<-try(kmeans(Mtilde,centers = nb.clust,nstart = nstart,iter.max=iter.max))
+  if("try-error"%in% class(res.kmeans)){
+    res.kmeans<-sample(seq(nb.clust),size = ncol(Mtilde),replace=TRUE)
+  }else{
+    res.kmeans<-res.kmeans$cluster
+  }
+  
+  H<-FactoMineR::tab.disjonctif(as.factor(res.kmeans))
+  Htilde<-H%*%diag(diag(1/sqrt(crossprod(H))),nb.clust,nb.clust) #equivalent de G dans Matlab
+  S<-crossprod(H)
+  continue<-TRUE
+  critsave<-sqrt(sum(diag(crossprod(Mtilde-Htilde%*%tcrossprod(S,Htilde)))))
+  comp<-1
+  
+  while(continue){
+    if(printflag){cat(comp,"...")}
+    
+    #Htilde update
+    MHS <- Mtilde%*%Htilde%*%S
+    multHtilde<-sqrt(MHS/(tcrossprod(Htilde)%*%MHS))
+    multHtilde[is.nan(multHtilde)]<-0
+    Htilde<-Htilde*multHtilde
+    
+    #S update
+    cpHtilde <- crossprod(Htilde)
+    multS<-sqrt((crossprod(Htilde,Mtilde)%*%Htilde)/(cpHtilde%*%S%*%cpHtilde))
+    multS[is.nan(multS)]<-0
+    multS[is.infinite(multS)]<-0
+    S<-S*multS
+    
+    critsave<-c(critsave,sqrt(sum(diag(crossprod(Mtilde-Htilde%*%tcrossprod(S,Htilde))))))
+    comp<-comp+1
+    diffcrit<-critsave[comp-1]-critsave[comp]
+    continue<-(diffcrit>=threshold)
+  }
+  if(printflag){cat("done \n")}
+  res<-list(Htilde=Htilde,S=S,crit=critsave,Mtilde=Mtilde,cluster=apply(Htilde,1,which.max))
+  
+  return(res)
+}
+# Est équivalente à la fonction TriNMF de Matlab: au critère d'arret près
+#------------------------------------------------------
+
+# Cette fonction retourne le vecteur b utile pour calculer les poids par la suite
+
+# Entree: H: c'est la matrice que nous avons trouvé par NMF
+#         M: C'est la structure contenant toutes la matrices de connectivité des partitions 
+
+# Sortie: bvect: c'est un vecteur de longueur T= nombre de partition=nb matrice de connectivité  
+# nb_part est le nombre des partitions
+
+bVect=function(H,M){
+  nb_part=length(M)
+  M=lapply(M, as.matrix)
+  H <- as.matrix(H)
+  bvect=vector(mode="double",length=nb_part)
+  for (i in 1:nb_part){
+    bvect[i]=Trace((t(H)%*%(M[[i]])%*%H))
+  }
+  return(bvect)
+}
+
+#----------------------------Algorithme W_NMF------------------------------
+
+# Programme qui prend en entrée un ensemble de tableau ou cluster et donne en sortie un cluster
+# Avec les poids contributifs
+
+consensus_wnmf <- function(M,nb_cluster,option="M",maxiter=30){
+  nb_class <- nb_cluster
+  all_H=Calcul_Hp(M,option=option,nb_class) # Calcul des matrices de connectivité
+  all_M=Calcul_allM(M,option = option,nb_class)
+  C=as.matrix(nearPD(Calcul_A(all_H))$mat)            #Calcul de la matrice A
+  #W=Poid_init(all_H)
+  W = c(0.11, 0.10, 0.12, 0.12, 0.10, 0.11, 0.11, 0.12, 0.10)
+  r=rep(1,length(all_H))
+  A <- matrix(1,1,length(all_H))
+  A <- rbind(A, r, diag(length(all_H)),-diag(length(all_H)))
+  
+  #----------------------------Algorithme W_NMF------------------------------
+  
+  nb_iter=0
+  critere_=TRUE
+  epsilon=10^(-6)
+  critere_err=0
+  
+  while(critere_){
+    
+    cat(critere_)
+    # elle représente la matrice M_tilde calculer en fonction des poids et des matrices de connectivité
+    cat(W)
+    M_avg=Moy_pond(all_H,W)
+    # fixer les poids et résoudre H_tild
+    # Wi <- W
+    H=nmf_(M_avg,nb_class)$Htilde
+    
+    # Fixer H_tild et resoudre les poids
+    f <- c(1, 0.00000001, rep(0,length(all_H)),rep(-1,length(all_H)))
+    W <- solve.QP(Dmat=C, dvec = (-1)*(bVect(H,all_M)), Amat=t(A), bvec=f, meq=1)$solution # Optimisation
+    cat(W)
+    
+    if(nb_iter==0){
+      critere_err <- Trace(M_avg%*%M_avg)-2*Trace(t(H)%*%M_avg%*%H)+
+        Trace(crossprod(H%*%t(H),t(H%*%t(H))))
+      taux_err <- critere_err
+      nb_iter=nb_iter+1
+      critere_ <- as.logical(taux_err>epsilon)
+    }
+    else{
+      critere_err_i <- critere_err
+      critere_err <- Trace(M_avg%*%M_avg)-2*Trace(t(H)%*%M_avg%*%H)+
+        Trace(crossprod(H%*%t(H),t(H%*%t(H))))
+
+      ecart_ <- abs(critere_err_i-critere_err)
+      taux_err <- append(taux_err,ecart_)
+      nb_iter=nb_iter+1
+      critere_ <- as.logical(ecart_>epsilon)
+    }
+  }
+
+cluster_ <- apply(H, 1,which.max)
+res_wnmf=list(cluster=cluster_,W=W,H=H,nb_iter=nb_iter,taux_erreur=taux_err)
+
+return(res_wnmf)
+
+}
+
+```
+
+
+```{r consensusSims}
+
+consensusSims <- function(clusterings, k){
+  nVars=dim(clusterings)[2]
+  nObs=dim(clusterings)[1]
+  nMethods=dim(clusterings)[2]
+  names = paste("V", 1:nVars, sep="")
+  
+clusters = clusterings
+  # For each simulation, matrix with columns=methods and rows=variables:
+ 
+    #Initialization
+      #MajVot
+      majVot=majority_voting(clusters); 
+      names(majVot)=names 
+      #CSPA
+      AA<- array(clusters, dim=c(nObs, nVars, 1,1)) ; 
+      dimnames(AA)[[k]] <- k ; 
+      cspaCons <- CSPA(AA, k = k)
+      names(cspaCons)=names
+      #NMF
+      Cl=list()
+      for(i in 1:nVars){
+        Cl[[i]]=as.matrix(clusters[,1])
+        }
+      
+      
+      H_cl=Calcul_Hp(Cl,option="P")
+      M_cl=Calcul_allM(Cl, option="P",k)
+      Moy_cl=Moy_pond(M_cl,rep(1/length(M_cl),length(M_cl)))
+      
+      ResNMF=nmf_(Moy_cl,nb.clust = k)
+      NMFCons=ResNMF$cluster
+      ResWNMF=consensus_wnmf(Cl,option = "P",nb_cluster = k)
+      
+      # NMF
+      WNMFCons=ResWNMF$cluster
+      WNMFConsWeight=ResWNMF$W #weigth for wnmf
+      
+      
+      #RV
+      RVMatrix <- matrix(0,nMethods,nMethods)
+      Q <- array(0, dim = c(nObs,nObs,nMethods))
+      for (i in 1:nMethods){Q[,,i] <- connectivity(clusters[,i])}
+      RVMatrix <- matrix(0,nMethods,nMethods)
+      for(i in 1:nMethods){
+        for(j in i:nMethods){
+          RVMatrix[i,j] <- coeffRV(Q[,,i],Q[,,j])$rv ;
+        RVMatrix[j,i] <-RVMatrix[i,j]
+        }
+        }
+      EI <- eigen(RVMatrix) 
+      weights <- abs(EI$vectors[,1])/sqrt(EI$values[1]) 
+      W <- matrix(0,nObs,nObs)
+      for (i in 1:nMethods){
+        W <- W + weights[i]*Q[,,i]
+        }
+      clus <- hclust(as.dist(1-W))
+      RVCons <- cutree(clus, k = k) ; names(RVCons) <- names
+      RVWeights <- weights #weigth for RVcons
+    
+  rownames(majVot)<-NULL;
+  rownames(cspaCons)<-NULL;
+  rownames(RVCons)<-NULL;
+  rownames(RVWeights)<-NULL;
+  out=list()
+  out[[1]] <-  cbind(majVot, cspaCons, RVCons,NMFCons,WNMFCons)
+  out[[2]] <-  rbind(RVWeights,WNMFConsWeight)
+  
+  return(out)
+}
+```
+
+```{r Optimisation params ff}
+optimParamSimulation <-function(X, y, from, to, length.out, partition, params, paramInd){
+  ffParam = list()
+  i=1
+  for(param in seq(from, to, length.out)){
+    params[paramInd] = param
+    ffParam[[i]]=fuzzyFu(X, y, partition,
+                       scDrop = params[1], scKeep = params[2], 
+                       scMtry = params[3], scMintree = params[4],
+                       seDrop = params[5], seSelec = params[6], 
+                       seMtry = params[7], seMintree = params[8])
+    i=i+1
+  }
+  accList = list()
+  i=1
+  for(fuzz in ffParam){
+    accList[[i]]=(mean(y==fuzz$final_rf$predicted))  
+    i=i+1
+  }
+  paramOpti = seq(from, to, length.out)[which.max(unlist(accList))]
+
+  Res=list(accList=accList, paramOptim=paramOpti)
+  return(Res)
+}
+
+
+fuzzyFu <- function(X, y, clustering, scDrop, scKeep, scMtry, scMintree, seDrop, seSelec, seMtry, seMintree){
+   
+  sc <- screen_control(drop_fraction = scDrop, keep_fraction = scKeep,
+                       mtry_factor = scMtry, min_ntree = scMintree)
+  se <- select_control(drop_fraction = seDrop, number_selected = seSelec,
+                       mtry_factor = seMtry, min_ntree = seMintree)
+  ff <- ff(X, y, module_membership=clustering, final_ntree = 5000, screen_params = sc, select_params = se, num_processors = 1)
+  return(ff)
+}
+
+```
+
+
+## Experimentation
+
+```{r data generation}
+lin_dat1 <- linear_sim(n=200, mod_sizes=c(25, 25, 25, 25),
+                          beta_pos=c(1:3, 76:78),
+                          beta_vals=c(5, 5, 2, 5, 5, 2), rho=.8, sd=.05,LastModCorr = TRUE)
+X1 <- lin_dat1$X
+y1 <- lin_dat1$y
+name1 <- lin_dat1$nameData
+labels1 <- c(rep(1,25), rep(2,25), rep(3,25), rep(4,25))
+
+lin_dat2 <- linear_sim(n=200, mod_sizes=c(25, 25, 25, 25),
+                          beta_pos=c(1:3, 76:78),
+                          beta_vals=c(5, 5, 2, 5, 5, 2), rho=.8, sd=.05)
+X2 <- lin_dat2$X
+y2 <- lin_dat2$y
+name2 <- lin_dat2$nameData
+labels2 <- c(rep(1,25), rep(2,25), rep(3,25), rep(4,25))
+
+nLin_dat3 <- nonlinear_sim(n=200, mod_sizes=c(25,25,25,25), rho=.8)
+X3 <- nLin_dat3$X
+y3 <- nLin_dat3$y
+name3 <- nLin_dat3$nameData
+
+labels3 <- c(rep(1,25), rep(2,25), rep(3,25), rep(4,25)) 
+
+corrplot(cor(X1),method="color", title = name1)
+corrplot(cor(X2),method="color", title = name2)
+corrplot(cor(X3),method="color", title = name3)
+
+```
+```{r }
+
+```
+
+### RF for one exemple
+
+```{r rfOneEx}
+
+listData = list(lin_dat1, lin_dat2, nlin_dat3)
+list_result = list()
+i = 1
+for(dat in listData){
+  
+  X <- dat$X
+  y <- dat$y
+  
+  VarNames=1:100
+  Col=rep("red",100)
+  Col[c(1,2,3,4,76,77,78,79)]="blue"
+  ResRF <- randomForest(X,as.vector(y), data=dat, ntree=1000, keep.forest=FALSE,importance=TRUE)
+  list_result[[i]] = ResRF
+  i=i+1
+
+}
+
+for(ResRF in list_result){
+  
+  varImpPlot(ResRF,pch=16)
+  order(ResRF$importance[,1])
+  
+}
+```
+
+
+```{r}
+simulation1 <- sims(simType = 1, n = 30)
+simulation2 <- sims(simType = 2, n = 30)
+simulation3 <- sims(simType = 3, n = 30)
+
+```
+
+```{r}
+corrplot(cor(simulation1$Xs[[2]]),method="color", title = name1)
+corrplot(cor(simulation2$Xs[[2]]),method="color", title = name2)
+corrplot(cor(simulation3$Xs[[2]]),method="color", title = name3)
+```
+
+
+### Simulation 30X
+
+```{r ffOneEx}
+# Fixed hyperparameter for ff
+sc <- screen_control(drop_fraction = .1, keep_fraction = .1,
+                     mtry_factor = .5, min_ntree = 500, ntree_factor = 1)
+se <- select_control(drop_fraction = .1, number_selected = 61,
+                     mtry_factor = 1, min_ntree = 500, ntree_factor = 1)
+list_datasim = list(simulation1=simulation1, simulation2=simulation2, simulation3=simulation3)
+list_result_global = list()
+
+E = 1
+
+for(simulation in list_datasim){
+  result_rf = list()
+  result_ff = list()
+  list_err = list()
+  list_ARI = list()
+  list_ResTotPart = list()
+  list_resultg = list()
+  list_ResTotWeigth = list()
+
+  for(ii in 1:length(simulation$Xs)){
+    
+    X <- simulation$Xs[[ii]]
+    y <- simulation$Ys[[ii]]
+    
+    VarNames=1:100
+    Col=rep("red",100)
+    Col[c(1,2,3,4,76,77,78,79)]="blue"
+    
+    # RF
+    ResRF <- randomForest(X,as.vector(y), data=simulation, ntree=1000, keep.forest=FALSE,importance=TRUE)
+    result_rf[[ii]] = ResRF
+    
+    # FF
+    ResFF<- ff(X, as.vector(y), module_membership = Labels, 
+               final_ntree = 50,screen_params = sc, select_params = se)
+    result_ff[[ii]] = ResFF
+    
+    
+    EnsCl=clusteringSims(X,y,4)
+    ResEnsCl=consensusSims(EnsCl,4)
+    partition_ref = rep(1:4, each=25)
+    
+    ResTotPart=cbind(EnsCl,ResEnsCl[[1]], partition_ref)
+    ResTotWeigth = ResEnsCl[[2]]
+    
+    ResRandAjusted=matrix(0,dim(ResTotPart)[2],dim(ResTotPart)[2])
+    for(i in 1:dim(ResTotPart)[2]){
+      for( j in i:dim(ResTotPart)[2]){
+      ResRandAjusted[i,j]=ARI(ResTotPart[,i],ResTotPart[,j])
+      ResRandAjusted[j,i]=ResRandAjusted[i,j]
+       }
+      }
+    round(ResRandAjusted,3)
+    list_ARI[[ii]] = ResRandAjusted
+  
+    ResEnsFF=list()
+    test_err=rep(0,dim(ResTotPart)[2])
+    for(i in 1:dim(ResTotPart)[2]){
+      ResEnsFF[[i]]=ff(X, as.vector(y), module_membership=ResTotPart[,i], final_ntree = 50,
+                       screen_params = sc, select_params = se, num_processors = 1)
+      ResEnsFF[[i]]$feature_list
+      #obtain predicted values for a new test set
+      preds <- predict(ResEnsFF[[i]], new_data=X)
+      #estimate test set error
+      test_err[i] <- sqrt(sum((y - preds)^2)/length(y))
+      }
+    list_err[[ii]] = test_err
+    list_ResTotPart[[ii]] = ResTotPart
+    list_ResTotWeigth[[ii]] = ResTotWeigth
+    cat("step...", ii, "Exp", E, sep = " ")
+  }
+  list_resultg = list(result_rf=result_rf, result_ff=result_ff, list_err=list_err,
+                      list_ARI=list_ARI, list_ResTotPart=list_ResTotPart, list_ResTotWeigth = list_ResTotWeigth)
+  list_result_global[[E]] = list_resultg
+  E = E+1
+}
+
+```
+
+```{r}
+ARIsim1  = list_result_global[[2]]$list_ARI
+for (clv in 1:30) {
+  X_tocoplot = ARIsim1[[clv]]
+  X_tocoplot
+  colnames(X_tocoplot) = colnames(ResTotPart)
+  rownames(X_tocoplot) = colnames(ResTotPart)
+  corrplot(X_tocoplot, method="color", title = name3)
+  
+}
+
+```
+
+
+```{r}
+
+nom_partition = c("NbClustWdSil", "CLVClust" ,  "VarClus" ,"DianaClust" ,   "agnesClus" ,    "pamLabels"  ,   "hclusres"  ,    "kmeansvarClus", "ScClus"   , "majVot"  ,      "cspaCons" , "RVCons"    ,    "NMFCons"  ,     "WNMFCons" , "ref")
+
+for (k in 1:30) {
+  
+
+partitions = list_result_global[[1]]$list_ResTotPart[[k]]
+partitions= cbind(partitions, partition_ref = rep(1:4, each=25))
+ResRandAjusted = matrix(NA,15,15)
+
+for(i in 1:dim(partitions)[2]){
+      for( j in i:dim(partitions)[2]){
+      ResRandAjusted[i,j]=ARI(partitions[,i],partitions[,j])
+      ResRandAjusted[j,i]=ResRandAjusted[i,j]
+       }
+      }
+    round(ResRandAjusted,3)
+    list_ARI[[k]] = ResRandAjusted
+    colnames(ResRandAjusted) = nom_partition
+    rownames(ResRandAjusted) = nom_partition
+    corrplot(ResRandAjusted, method = 'color')
+    
+}
+```
+
+```{r}
+
+nom_partition = c("NbClustWdSil", "CLVClust" ,  "VarClus" ,"DianaClust" ,   "agnesClus" ,    "pamLabels"  ,   "hclusres"  ,    "kmeansvarClus", "ScClus"   , "majVot"  ,      "cspaCons" , "RVCons"    ,    "NMFCons"  ,     "WNMFCons" , "ref")
+
+for (k in 1:30) {
+  
+
+partitions = list_result_global[[2]]$list_ResTotPart[[k]]
+partitions= cbind(partitions, partition_ref = rep(1:4, each=25))
+ResRandAjusted = matrix(NA,15,15)
+
+for(i in 1:dim(partitions)[2]){
+      for( j in i:dim(partitions)[2]){
+      ResRandAjusted[i,j]=ARI(partitions[,i],partitions[,j])
+      ResRandAjusted[j,i]=ResRandAjusted[i,j]
+       }
+      }
+    round(ResRandAjusted,3)
+    list_ARI[[k]] = ResRandAjusted
+    colnames(ResRandAjusted) = nom_partition
+    rownames(ResRandAjusted) = nom_partition
+    corrplot(ResRandAjusted, method = 'color')
+    
+}
+```
+
+```{r}
+
+nom_partition = c("NbClustWdSil", "CLVClust" ,  "VarClus" ,"DianaClust" ,   "agnesClus" ,    "pamLabels"  ,   "hclusres"  ,    "kmeansvarClus", "ScClus"   , "majVot"  ,      "cspaCons" , "RVCons"    ,    "NMFCons"  ,     "WNMFCons" , "ref")
+
+for (k in 1:30) {
+  
+
+partitions = list_result_global[[3]]$list_ResTotPart[[k]]
+partitions= cbind(partitions, partition_ref = rep(1:4, each=25))
+ResRandAjusted = matrix(NA,15,15)
+
+for(i in 1:dim(partitions)[2]){
+      for( j in i:dim(partitions)[2]){
+      ResRandAjusted[i,j]=ARI(partitions[,i],partitions[,j])
+      ResRandAjusted[j,i]=ResRandAjusted[i,j]
+       }
+      }
+    round(ResRandAjusted,3)
+    list_ARI[[k]] = ResRandAjusted
+    colnames(ResRandAjusted) = nom_partition
+    rownames(ResRandAjusted) = nom_partition
+    corrplot(ResRandAjusted, method = 'color')
+    
+}
+```
+
+```{r}
+ARIsim2  = list_result_global[[2]]$list_ARI
+for (clv in 1:30) {
+  
+  X_tocoplot = ARIsim2[[clv]]
+  X_tocoplot
+  colnames(X_tocoplot) = colnames(ResTotPart)
+  rownames(X_tocoplot) = colnames(ResTotPart)
+  corrplot(X_tocoplot, method="color", title = name3)
+  
+}
+
+```
+
+```{r}
+
+ARIsim3  = list_result_global[[3]]$list_ARI
+for (clv in 1:30) {
+  
+  X_tocoplot = ARIsim3[[clv]]
+  X_tocoplot
+  colnames(X_tocoplot) = colnames(ResTotPart)
+  rownames(X_tocoplot) = colnames(ResTotPart)
+  corrplot(X_tocoplot, method="color", title = name3)
+  
+}
+```
+```{r}
+
+weigthsim1  = list_result_global[[2]]$list_ResTotWeigth
+
+for (clv in 1:30) {
+  
+  X_tocoplot = weigthsim1[[clv]]
+  X_tocoplot
+  colnames(X_tocoplot) = colnames(ResTotPart)[1:9]
+  corrplot(X_tocoplot, method="number", title = name3)
+  
+}
+
+```
+
+```{r}
+
+weigthsim2  = list_result_global[[2]]$list_ResTotWeigth
+
+for (clv in 1:30) {
+  
+  X_tocoplot = weigthsim2[[clv]]
+  X_tocoplot
+  colnames(X_tocoplot) = colnames(ResTotPart)[1:9]
+  corrplot(X_tocoplot, method="number", title = name3)
+  
+}
+
+```
+
+```{r}
+
+weigthsim3  = list_result_global[[3]]$list_ResTotWeigth
+
+for (clv in 1:30) {
+  
+  X_tocoplot = weigthsim3[[clv]]
+  X_tocoplot
+  colnames(X_tocoplot) = colnames(ResTotPart)[1:9]
+  corrplot(X_tocoplot, method="number", title = name3)
+  
+}
+
+```
+
+
+
+```{r}
+
+test_result = list_result_global[[1]]
+list_err = test_result$list_err
+list_ResTotPart = test_result$list_ResTotPart
+
+for(iii in 1:30){
+  test_err = list_err[[iii]]
+  ResTotPart = list_ResTotPart[[iii]]
+  
+  plot(1:length(test_err),test_err,pch=16,ylim=c(min(test_err)-0.05,max(test_err)+0.05))
+  text(1:length(test_err),test_err+0.03,colnames(ResTotPart))
+
+}
+
+```
+
+
+```{r}
+test_result = list_result_global[[1]]
+list_err = test_result$list_err
+list_ResTotPart = test_result$list_ResTotPart
+df = data.frame()
+for(iii in 1:30){
+  test_err = list_err[[iii]]
+  df = rbind(df, test_err)
+}
+colnames(df) <- vect_test
+boxplot(df, ylim = c(min(df), max(df)), cex.axis = 0.35,
+        col = c(rep("red", 9), rep("blue",5)))
+```
+
+```{r}
+test_result = list_result_global[[2]]
+list_err = test_result$list_err
+list_ResTotPart = test_result$list_ResTotPart
+df = data.frame()
+for(iii in 1:30){
+  test_err = list_err[[iii]]
+  df = rbind(df, test_err)
+}
+colnames(df) <- vect_test
+boxplot(df, ylim = c(min(df), max(df)), cex.axis = 0.35,
+        col = c(rep("red", 9), rep("blue",5)))
+```
+
+```{r}
+test_result = list_result_global[[3]]
+list_err = test_result$list_err
+list_ResTotPart = test_result$list_ResTotPart
+df = data.frame()
+for(iii in 1:30){
+  test_err = list_err[[iii]]
+  df = rbind(df, test_err)
+}
+colnames(df) <- vect_test
+boxplot(df, ylim = c(min(df), max(df)), cex.axis = 0.35,
+        col = c(rep("red", 9), rep("blue",5)))
+```
+
+```{python}
+import math
+import pandas as pd
+import os 
+```
+
+
+
+
+
