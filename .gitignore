@@ -1,0 +1,17 @@
+*.h5
+*.hdf5
+*/logs/*
+*.pyc
+*.pkl
+*.xlsx
+*.csv
+*.pdf
+
+# Folder 
+
+/to_ignore/
+data/
+*.venv/
+"etat de l'art"/
+/Correction1/
+/nouvel_environnement/
